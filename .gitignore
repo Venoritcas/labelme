@@ -9,3 +9,7 @@
 
 .DS_Store
 .idea/
+
+# AI 模型文件（体积较大，不纳入版本控制；目录结构由 models/blobs/.gitkeep 维护）
+/models/blobs/*
+!/models/blobs/.gitkeep

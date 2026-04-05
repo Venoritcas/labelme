@@ -52,8 +52,15 @@ def _setup_loguru(logger_level: str) -> None:
     except ValueError:
         pass
 
-    if sys.stderr:
-        logger.add(sys.stderr, level=logger_level)
+    # On macOS frozen builds (console=False), sys.stderr is None but
+    # sys.__stderr__ is still connected when launched from a terminal.
+    stderr_sink = sys.stderr or (
+        sys.__stderr__
+        if sys.platform == "darwin" and getattr(sys, "frozen", False)
+        else None
+    )
+    if stderr_sink:
+        logger.add(stderr_sink, level=logger_level)
 
     cache_dir: str
     if os.name == "nt":
@@ -97,6 +104,30 @@ def _handle_exception(exc_type, exc_value, exc_traceback):
     if app := QtWidgets.QApplication.instance():
         app.quit()
     sys.exit(1)
+
+
+def _install_translator(app: QtWidgets.QApplication) -> None:
+    """Load and install the UI translation file matching the system locale."""
+    if getattr(sys, "frozen", False):
+        # PyInstaller: resources are under sys._MEIPASS/labelme/translate
+        translate_dir = osp.join(sys._MEIPASS, "labelme", "translate")  # type: ignore[attr-defined]
+    else:
+        translate_dir = osp.join(osp.dirname(osp.abspath(__file__)), "translate")
+
+    locale_name = QtCore.QLocale.system().name()  # e.g. "zh_CN"
+    lang_code = locale_name.split("_")[0]          # e.g. "zh"
+
+    logger.debug("UI locale: {}, translate dir: {}", locale_name, translate_dir)
+
+    translator = QtCore.QTranslator(app)
+    for name in (locale_name, lang_code):
+        qm_path = osp.join(translate_dir, f"{name}.qm")
+        if osp.isfile(qm_path) and translator.load(qm_path):
+            app.installTranslator(translator)
+            logger.debug("Loaded translation: {}", qm_path)
+            return
+
+    logger.debug("No translation found for locale '{}', using English.", locale_name)
 
 
 def main():
@@ -280,18 +311,14 @@ def main():
             )
         output_dir = output
 
-    translator = QtCore.QTranslator()
-    translator.load(
-        QtCore.QLocale.system().name(),
-        f"{osp.dirname(osp.abspath(__file__))}/translate",
-    )
     app = QtWidgets.QApplication(sys.argv)
-    app.setStyle("Fusion")  # for consistent appearance across platforms
-    # Force light mode to avoid dark mode UI issues (e.g., invisible icons)
+    app.setStyle("Fusion")
     app.setPalette(QtWidgets.QStyleFactory.create("Fusion").standardPalette())
     app.setApplicationName(__appname__)
     app.setWindowIcon(newIcon("icon"))
-    app.installTranslator(translator)
+
+    _install_translator(app)
+
     win = MainWindow(
         config_file=config_file,
         config_overrides=config_overrides,
@@ -300,7 +327,6 @@ def main():
     )
 
     if reset_config:
-        logger.info(f"Resetting Qt config: {win.settings.fileName()}")
         win.settings.clear()
         sys.exit(0)
 

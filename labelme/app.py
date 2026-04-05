@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import enum
 import functools
 import html
@@ -28,6 +29,7 @@ from PyQt5 import QtWidgets
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QMessageBox
 
+import labelme
 from labelme import __appname__
 from labelme import __version__
 from labelme._automation import bbox_from_text
@@ -148,6 +150,7 @@ class _Actions(NamedTuple):
     show_all: QtWidgets.QAction
     toggle_all: QtWidgets.QAction
     open_dir: QtWidgets.QAction
+    open_models_dir: QtWidgets.QAction
     zoom_widget_action: QtWidgets.QWidgetAction
     draw: list[tuple[str, QtWidgets.QAction]]
     zoom: tuple[ZoomWidget | QtWidgets.QAction, ...]
@@ -729,6 +732,13 @@ class MainWindow(QtWidgets.QMainWindow):
             None,
             toggle_keep_prev_mode,
         )
+        open_models_dir = action(
+            text=self.tr("Open Models Folder"),
+            slot=self._open_models_dir,
+            icon="folder-open.svg",
+            tip=self.tr("Open the user models folder in file manager"),
+        )
+
         return _Actions(
             about=about,
             save=save,
@@ -773,6 +783,7 @@ class MainWindow(QtWidgets.QMainWindow):
             show_all=show_all,
             toggle_all=toggle_all,
             open_dir=open_dir,
+            open_models_dir=open_models_dir,
             zoom_widget_action=zoom_widget_action,
             draw=draw,
             zoom=zoom,
@@ -834,6 +845,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._actions.save_with_image_data,
                 self._actions.close,
                 self._actions.delete_file,
+                None,
+                self._actions.open_models_dir,
                 None,
                 open_config,
                 None,
@@ -2365,6 +2378,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
             self.resetState()
 
+    def _open_models_dir(self) -> None:
+        """在系统文件管理器中打开用户模型目录。目录不存在时自动创建。"""
+        models_dir: str = labelme.USER_MODELS_DIR
+        os.makedirs(models_dir, exist_ok=True)
+
+        system: str = platform.system()
+        if system == "Darwin":
+            subprocess.Popen(["open", models_dir])
+        elif system == "Windows":
+            os.startfile(models_dir)  # type: ignore[attr-defined]
+        else:
+            subprocess.Popen(["xdg-open", models_dir])
+
+        logger.info("Opened models directory: {!r}", models_dir)
+
     def _open_config_file(self) -> None:
         if self._config_file is None:
             QtWidgets.QMessageBox.information(
@@ -2534,6 +2562,48 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._open_next_image()
 
+    def _load_labels_from_dir(self, root_dir: str) -> None:
+        """在指定目录中查找 labels.txt，找到则加载，否则清空标签列表。"""
+        labels_file = osp.join(root_dir, "labels.txt")
+        if osp.isfile(labels_file):
+            with codecs.open(labels_file, "r", encoding="utf-8") as f:
+                labels = [line.strip() for line in f if line.strip()]
+            logger.info("Auto-loaded {:d} labels from: {!r}", len(labels), labels_file)
+
+            # 更新配置
+            self._config["labels"] = labels
+
+            # 更新 Label List 面板
+            self._docks.unique_label_list.clear()
+            for lbl in labels:
+                self._docks.unique_label_list.add_label_item(
+                    label=lbl,
+                    color=self._get_rgb_by_label(
+                        label=lbl,
+                        unique_label_list=self._docks.unique_label_list,
+                    ),
+                )
+
+            # 更新标签对话框的候选列表
+            self._label_dialog.labelList.clear()
+            for lbl in labels:
+                self._label_dialog.addLabelHistory(lbl)
+
+            self.show_status_message(
+                self.tr("已从 labels.txt 加载 %d 个标签") % len(labels), delay=3000
+            )
+        else:
+            logger.info("No labels.txt found in: {!r}", root_dir)
+
+            # 清空标签列表，避免切换目录时残留上一个目录的标签
+            self._config["labels"] = None
+            self._docks.unique_label_list.clear()
+            self._label_dialog.labelList.clear()
+
+            self.show_status_message(
+                self.tr("未找到 labels.txt，标签列表已清空"), delay=3000
+            )
+
     def _import_images_from_dir(
         self, root_dir: str | None, pattern: str | None = None
     ) -> None:
@@ -2546,6 +2616,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._prev_opened_dir = root_dir
         self._filename = None
         self._docks.file_list.clear()
+
+        # 自动查找并加载当前目录下的 labels.txt
+        self._load_labels_from_dir(root_dir)
 
         filenames = _scan_image_files(root_dir=root_dir)
         if pattern:
